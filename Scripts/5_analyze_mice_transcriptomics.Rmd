@@ -1,0 +1,331 @@
+---
+title: "metabolomics_analysis"
+author: "Shuai"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r warning=FALSE}
+# library
+  library(readxl)
+  library(tidyr)
+  library(tidyverse)
+  library(dplyr)
+  library(ggplot2)
+  library(ggfortify)
+  library(tidyr)
+  library(tidyverse)
+  library(dplyr)
+  library(ggplot2)
+  library(ggfortify)
+  library(clusterProfiler)
+  library(biomaRt)
+  library(PANTHER.db)
+  library(AnnotationDbi)
+  library(org.Mm.eg.db) #BiocManager::install("org.Mm.eg.db")
+```
+
+# 1. perform the de analysis based on the final fpkm data
+
+```{r}
+# load the data
+  load("./data/transcriptomics_data_mice_fpkm.rdata")
+
+# Obtain the protein expression matrix of metabolomics data
+  res = data.frame(matrix(nrow = nrow(transcriptomics_final), ncol = 5))
+  colnames(res) =  c("AvgWT", "AvgMD", "Log2FC", "Log2BM", "pval")
+  for (i in 1:nrow(transcriptomics_final)) {
+    vec = as.numeric(transcriptomics_final[i,1:20])
+    m1= mean(na.omit(vec[1:10])) # WT
+    m2= mean(na.omit(vec[11:20])) # MD
+    m = log2(m2/m1)
+    a = (log2(m1)+log2(m2))/2
+    p = t.test(vec[1:10], vec[11:20])$p.value # two sided
+    res[i,] = c(m1,m2,m,a,p)
+  }
+  res$padj = p.adjust(res$pval, method = "fdr")
+  res$gene = row.names(transcriptomics_final)
+  row.names(res) = res$gene
+  save(res, file = "./data/transcriptomics_data_mice_fpkm_deres.rdata")
+```
+
+```{r}
+# load the data
+  load(file = "./data/transcriptomics_data_mice_fpkm_deres.rdata")
+# MA plot
+  res$color_group <- ifelse(abs(res$Log2FC) > 1 & res$pval < 0.05, 
+                            ifelse(res$Log2FC >= 1, "Significant Positive", "Significant Negative"), 
+                            "Non-significant")
+  table(res$color_group)
+  write.csv(res[res$color_group %in% c("Significant Positive", "Significant Negative"),],
+            file = "./figure_raw/mice_transcriptome_res/5_mice_de_genes.csv")
+  
+# Create the MA plot
+  ggplot(res, aes(x = Log2BM, y = Log2FC, colour = color_group)) +
+      geom_point(alpha = 0.5) +  # Plot points with transparency for better visualization
+      scale_color_manual(values = c("Non-significant" = "grey", 
+                                    "Significant Positive" = "red", 
+                                    "Significant Negative" = "darkblue")) +
+      labs(x = "Average", y = "Log2 Fold Change",
+           colour = "Significance") +
+      theme_minimal()  # Use a minimal theme
+  ggsave("./figure_raw/mice_transcriptome_res/sfig1_MAplot_mice_rnaseq.pdf")
+```
+
+# 2. PCA visualize the mice transcriptome data
+
+```{r}
+# Assuming your data is in a matrix or data frame called 'data_matrix'
+# Replace NA values with the column means
+  data_matrix = transcriptomics_final[res[! res$color_group %in% "Non-significant","gene"],1:20]
+  pca_result <- prcomp(t(data_matrix), scale. = F)
+# Create a data frame with the PCA results and sample information
+  pca_data <- as.data.frame((pca_result$x))
+  pca_data$Group <- c(rep("Healthy control",10),rep("MD",10) ) 
+  pca_data$Sample<- row.names(pca_data)
+# Plot PCA using ggplot2
+  ggplot(pca_data, aes(x = PC1, y = PC2, color = Group, shape = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "norm", linetype = 2) +
+    geom_text(aes(label = Sample), vjust = 1.5, size = 3) +  # Add sample names
+    scale_color_manual(values = c("Healthy control" = "#006989", "MD" = "#EE4E4E")) +
+    labs(title = "PCA Plot of Samples",
+         x = paste("PC1 (", round(summary(pca_result)$importance[2,1]*100, 2), "%)", sep=""),
+         y = paste("PC2 (", round(summary(pca_result)$importance[2,2]*100, 2), "%)", sep="")) +
+    theme_bw() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(angle = 45, hjust = 1)) +
+    ggtitle("PCA Plot of Samples") +
+    xlab(paste("PC1 (", round(summary(pca_result)$importance[2,1]*100, 2), "%)", sep="")) +
+    ylab(paste("PC2 (", round(summary(pca_result)$importance[2,2]*100, 2), "%)", sep=""))
+  ggsave("./figure_raw/mice_transcriptome_res/1_PCA_mice_rnaseq.pdf")
+```
+
+# 3. PANTHER classification
+
+```{r fig.width=20, fig.height=7.5}
+# Example list of protein names
+  library(PANTHER.db)
+  pthOrganisms(PANTHER.db) <- "MOUSE"
+```
+
+```{r fig.width=20, fig.height=7.5}
+# Convert protein names to UniProt IDs using biomaRt
+  protein_names <- unique(row.names(res[which(res$color_group == "Significant Positive"),])) # 373
+  mart <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  protein_ids <- getBM(attributes = c("mgi_symbol", "uniprotswissprot"), filters = "mgi_symbol", values = protein_names, mart = mart)
+  protein_ids <- protein_ids[protein_ids$uniprotswissprot != "", ]
+  uniprot_ids <- protein_ids$uniprotswissprot
+# Retrieve protein classifications using PANTHER.db
+  panther_mapping <- select(PANTHER.db, keys = uniprot_ids, columns = c("CLASS_ID","CLASS_TERM"), keytype = "UNIPROT")
+  panther_mapping_pos = merge(panther_mapping, protein_ids, by.x = c("UNIPROT"), by.y = c("uniprotswissprot"))
+  write.csv(panther_mapping_pos, file = "./figure_raw/mice_transcriptome_res/sfig2_PANTHER.pos.csv")
+# GGplot
+  data = data.frame(Values = sort(table(panther_mapping_pos$CLASS_TERM), T))
+  colnames(data) = c("Category", "Values")
+  ggplot(data, aes(x = Category, y = Values)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "Customized Bar Plot", x = "Category", y = "Value") +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  ggsave("./figure_raw/mice_transcriptome_res/sfig2_PANTHER.pos.pdf", width = 20, height = 7.5)
+```
+
+```{r fig.width=20, fig.height=7.5}
+# Convert protein names to UniProt IDs using biomaRt
+  protein_names <- unique(row.names(res[which(res$color_group == "Significant Negative"),])) # 373
+  mart <- useMart("ensembl", dataset = "mmusculus_gene_ensembl")
+  protein_ids <- getBM(attributes = c("mgi_symbol", "uniprotswissprot"), filters = "mgi_symbol", values = protein_names, mart = mart)
+  protein_ids <- protein_ids[protein_ids$uniprotswissprot != "", ]
+  uniprot_ids <- protein_ids$uniprotswissprot
+# Retrieve protein classifications using PANTHER.db
+  panther_mapping <- select(PANTHER.db, keys = uniprot_ids, columns = c("CLASS_ID","CLASS_TERM"), keytype = "UNIPROT")
+  panther_mapping_pos = merge(panther_mapping, protein_ids, by.x = c("UNIPROT"), by.y = c("uniprotswissprot"))
+  write.csv(panther_mapping_pos, file = "./figure_raw/mice_transcriptome_res/sfig3_PANTHER.neg.csv")
+# GGplot
+  data = data.frame(Values   = sort(table(panther_mapping$CLASS_TERM), T))
+  colnames(data) = c("Category", "Values")
+  ggplot(data, aes(x = Category, y = Values)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "Customized Bar Plot", x = "Category", y = "Value") +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  ggsave("./figure_raw/mice_transcriptome_res/sfig3_PANTHER.neg.pdf", width = 20, height = 7.5)
+```
+
+# 4. Enrichment ment analysis
+
+```{r warning=FALSE, fig.width=6.5, fig.height=4}
+# Use GO analysis to study the GO res of top genes
+  protein_list <- row.names(res[which(res$color_group == "Significant Positive"),])
+  entrez_ids <- bitr(protein_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+
+# Perform GO enrichment analysis
+  go_enrich <- enrichGO(gene = entrez_ids$ENTREZID,
+                        OrgDb = org.Mm.eg.db,
+                        keyType = "ENTREZID",
+                        ont = "BP",
+                        pAdjustMethod = "BH",
+                        qvalueCutoff = 0.05,
+                        readable = TRUE)
+# Dotplot for GO enrichment results
+  go_res = go_enrich@result[!duplicated(go_enrich@result$geneID),]
+  hist(go_res$Count)
+  go_res = go_res[which(go_res$Count>=4),]  
+  write.csv(go_res, file = "./figure_raw/mice_transcriptome_res/2_GOres_positive.csv")
+  
+  top10_each_ontology <- go_res %>% slice_head(n = 10) 
+  top10_each_ontology$GeneRatio = top10_each_ontology$Count/97
+  ggplot(top10_each_ontology, aes(x = -log10(p.adjust), 
+                                  y = reorder(Description, -p.adjust), 
+                                  size = GeneRatio, color = -log10(p.adjust))) +
+    geom_point(alpha = 0.7) +  # Add transparency to dots
+    scale_color_gradient(low = "blue", high = "red") +  # Set color gradient from low to high significance
+    scale_size(range = c(3, 10)) +  # Adjust dot size range for visibility
+    labs(title = "Gene Ontology (GO) Enrichment Analysis",
+         x = "-log10(Adjusted p-value)",
+         y = "GO Term Description",
+         color = "-log10(Adjusted p-value)",
+         size = "Gene Ratio") +
+    # facet_wrap(~ ONTOLOGY, nrow = 3, scales = "free_y") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),  # Rotate x-axis labels for readability
+          legend.position = "right",  # Adjust legend position as needed
+          strip.background = element_blank(),  # Remove background of facet labels
+          strip.text = element_text(size = 12))  # Adjust size of facet titles
+  ggsave("./figure_raw/mice_transcriptome_res/2_GOres_positive.pdf", width = 6.5, height = 4)
+```
+
+```{r warning=FALSE, fig.width=8, fig.height=4}
+# Retrieve KEGG pathway annotations (optional)
+  protein_list <- row.names(res[which(res$color_group == "Significant Positive"),])
+  entrez_ids <- bitr(protein_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Mm.eg.db)
+  kegg_enrich <- enrichKEGG(gene = entrez_ids$ENTREZID,
+                            organism = "mmu",
+                            pAdjustMethod = "BH",
+                            qvalueCutoff = 0.05)
+  kegg_res = kegg_enrich@result[!duplicated(kegg_enrich@result$geneID),]
+  hist(kegg_res$Count)
+  kegg_res = kegg_res[which(kegg_res$Count>=3),]
+  write.csv(kegg_res, file = "./figure_raw/mice_transcriptome_res/3_KEGGres_positive.csv")
+  kegg_res$GeneRatio = kegg_res$Count/51
+  
+# Visualize KEGG pathway enrichment
+  ggplot(kegg_res[c(1:9,11),], aes(x = -log10(p.adjust), 
+                              y = reorder(Description, -p.adjust), 
+                              size = GeneRatio, color = -log10(p.adjust))) +
+    geom_point(alpha = 0.7) +  # Add transparency to dots
+    scale_color_gradient(low = "blue", high = "red") +  # Set color gradient from low to high significance
+    scale_size(range = c(3, 10)) +  # Adjust dot size range for visibility
+    labs(title = "",
+         x = "-log10(Adjusted p-value)",
+         y = "",
+         color = "-log10(adjp)",
+         size = "Gene Ratio") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),  # Rotate x-axis labels for readability
+          legend.position = "right",  # Adjust legend position as needed
+          strip.background = element_blank(),  # Remove background of facet labels
+          strip.text = element_text(size = 12))  # Adjust size of facet titles
+  # ggsave("./figure_raw/mice_transcriptome_res/3_KEGGres_positive.pdf", width = 8, height = 4)
+```
+
+
+---------------------------------------------------------------------------------------------------------------
+
+# 5. Key pathways and genes
+
+---------------------------------------------------------------------------------------------------------------
+
+
+# 5.1 Show metabolites from key pathways
+
+```{r fig.width=3.5, fig.height=4}
+# Create a dataframe with the metabolite names and their corresponding HMDB IDs
+  load(file = "./data/metabolomics_data_mice.rdata")
+  # metabolomics_final[metabolomics_final$`Class I` == "SL", 23]
+  # sort(metabolomics_final$Compounds)
+  compound = 
+  c("L-Serine","Sphingosine 1-phosphate","Sphinganine 1-phosphate","Dihydro-D-sphingosine",
+    "Sphingosyl-phosphocholine",
+    # "Sphingosine (d17:1)",
+    "O-Phosphorylethanolamine" )
+# expr
+  expr.log2 = log2(metabolomics_final[,1:20]+1)
+  row.names(expr.log2) = metabolomics_final$Compounds
+  labels <- c("MDs", "Healthy")  
+  for (i in 1:6) {
+    m = compound[i]
+    vec = as.numeric(expr.log2[metabolomics_final$Compounds == m, ])
+    # pdf(paste0("./figure_raw/mice_metabolomics_res/pathway/",i,".pdf"), height = 4, width = 3.5)
+    # boxplot(vec[1:10], vec[11:20], 
+    #         main = m,
+    #         col = c("#006989","#EE4E4E"),
+    #         xaxt = "n")   # 禁用 x 轴标签
+    # text(x = 1:2, y = par("usr")[3] - 0.5, srt = 45, adj = 1, labels = labels, xpd = TRUE)
+    print(t.test(vec[1:10], vec[11:20])$p.value)
+    # dev.off()
+  }
+```
+
+# 5.2 Show genes from key pathways
+
+```{r fig.width=3.5, fig.height=4}
+# load the data
+  load(file = "./data/transcriptomics_data_mice_fpkm.rdata")
+  s1p_genes = c("Sphk1", "Sphk2", # Sphingosine Kinase
+                "Sgpp1", "Sgpp2", # Sphingosine-1-Phosphate Phosphatase
+                "Sgpl1",          # Sphingosine-1-Phosphate Lyase
+                "S1pr1", "S1pr2", "S1pr3", "S1pr4", "S1pr5",          # S1P Receptors
+                "Cers1", "Cers2", "Cers3", "Cers4", "Cers5", "Cers6", # Ceramide Synthases
+                "Smpd1", "Smpd2", "Smpd3", "Smpd4" )                   # Sphingomyelinases
+  
+  rnaseq = as.matrix(transcriptomics_final[,1:20]) #preprocessCore::normalize.quantiles(, keep.names = T )
+  genes = intersect(s1p_genes, row.names(rnaseq))
+  
+  # transcriptomics_final[,1:20]
+  
+  # pheatmap::pheatmap(log2(rnaseq[intersect(s1p_genes,row.names(transcriptomics_final)),]) ,
+  #                    cluster_rows = F, cluster_cols = F,
+  #                    scale = "row")
+
+# Create a dataframe with the metabolite names and their corresponding HMDB IDs
+  labels <- c("MDs", "Healthy")
+  for (i in 1:2) {
+    # g = genes[i]
+    g = c("Sgpl1", "Cers5")[i]
+    vec = as.numeric(rnaseq[g, 1:20])
+    pdf(paste0("./figure_raw/mice_transcriptome_res/4_boxplo",g,".pdf"), height = 4, width = 3.5)
+    boxplot(vec[1:10], vec[11:20],
+            main = g,
+            col = c("#006989","#EE4E4E"),
+            xaxt = "n")   # 禁用 x 轴标签
+    text(x = 1:2, y = par("usr")[3] - 0.5, srt = 45, adj = 1, labels = labels, xpd = TRUE)
+    print(t.test(vec[1:10], vec[11:20])$p.value) 
+    dev.off()
+  }
+```
+
+# 5.3 Show metabolite interconversion enzyme
+
+```{r}
+# load the gene
+  category = read.csv(file = "./figure_raw/mice_transcriptome_res/sfig2_PANTHER.pos.csv")
+  category_meta = category$mgi_symbol[category$CLASS_TERM == "metabolite interconversion enzyme" ] 
+  category_tran = category$mgi_symbol[category$CLASS_TERM == "transmembrane signal receptor" ] 
+  category_immu = category$mgi_symbol[category$CLASS_TERM == "defense/immunity protein" ] 
+  category_meta; category_tran; category_immu
+  pheatmap::pheatmap(log2(rnaseq[category_meta,]+1) , cluster_rows = F, cluster_cols = F, scale = "row")
+  pheatmap::pheatmap(log2(rnaseq[category_tran,]+1) , cluster_rows = F, cluster_cols = F, scale = "row")
+  pheatmap::pheatmap(log2(rnaseq[category_immu,]+1) , cluster_rows = F, cluster_cols = F, scale = "row")
+```
+
+```{r}
+# selected genes
+  g = c("Alox5ap", "Pik3cg", "Mgst2")
+  for (i in 1:3) {
+    vec = as.numeric(rnaseq[g[i],])
+    print( mean(vec[11:20])/mean(vec[1:10]) )
+    print(t.test(vec[1:10], vec[11:20])$p.value)
+  }
+```

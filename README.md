@@ -20,7 +20,6 @@ Our study provides the most comprehensive molecular landscape of MD to date, pro
 - **Data**: Contains processed data from the WES and metabolomics profiling (Data have also been deposited on Mendeley at DOI: 10.17632/2dzmgdmwyz.1.).
 - **Scripts**: R scripts used for data analysis.
 - **Results**: Outputs of the data analysis, including figures and tables.
-- **Documentation**: Detailed documentation of the methods used in the study.
 
 ## Usage Instructions
 1. **Data Preparation**: Follow the instructions in the `Data` folder to prepare and preprocess the raw data.

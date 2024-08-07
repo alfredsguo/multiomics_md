@@ -1,0 +1,170 @@
+---
+title: "metabolomics_analysis"
+author: "Shuai"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r warning=FALSE}
+# library
+  library(readxl)
+  library(tidyr)
+  library(tidyverse)
+  library(dplyr)
+  library(ggplot2)
+  library(ggfortify)
+```
+
+# 1. prepare the input of the mice metabolomics data for MetaboAnalyst
+
+```{r}
+# load the data
+  load(file = "./data/metabolomics_data_mice.rdata")
+
+# Prepare the input for MetaboAnalyst P vs N
+  input = data.frame(t(metabolomics_final[,c(22, 1:20)]))
+  input2 = input[,-which(input["HMDB",] == "-")]
+  colnames(input2) = input2[1,]; input3 = input2[-1,]
+  input3 = cbind(Phenotype = c(rep("BN",10), rep("AMD",10)),input3)
+  
+# save the input  
+  write.csv(input3, file = "./data/metabolomics_data_mice_metaboanalyst_input.csv")
+```
+
+# 2. data overview
+
+```{r fig.width=6, fig.height=4}
+# plot the class annotation
+  metabolite_class = sort(table(metabolomics_final$`Class I`), decreasing = T)
+  metabolite_class  
+  df = data.frame(Class = names(metabolite_class),
+                  Value = as.numeric(metabolite_class))
+  df$Class = factor(df$Class, levels = rev(names(metabolite_class)))
+  ggplot(df, aes(x = Class, y = Value)) +
+    geom_bar(stat = "identity", fill = "black") +
+    coord_flip() +
+    labs(title = "Protein Class", x = "Protein Class", y = "Number of Proteins") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave("./figure_raw/mice_metabolomics_res/sfig1_metabolite_class.pdf", height = 4, width = 6)
+```
+
+```{r}
+# Prepare the transformed matrix
+  expr = log2(metabolomics_final[,1:20]+1)
+  categories <- c(rep("BN",10), rep("AMD",10))
+  colnames(expr) = factor(colnames(expr), levels = c(paste0("MD_",1:10), paste0("WT_",1:25)))
+  names(categories) <- colnames(expr)
+  
+# Convert the matrix to a long format
+  expression_df <- as.data.frame(expr) %>%
+      rownames_to_column(var = "Gene") %>%
+      gather(key = "Sample", value = "Expression", -Gene)
+  expression_df <- expression_df %>% mutate(Category = categories[Sample])
+  expression_df$Sample = factor(expression_df$Sample, levels = c(paste0("MD_",1:10), paste0("WT_",1:10)))
+  
+# Create the box plot showing the expression level for each proteins
+  p =
+  ggplot(expression_df, aes(x = Sample, y = Expression, fill = Category)) +
+    geom_boxplot(outlier.shape = NA) +
+    labs(title = "", x = "Sample", y = "Expression") +
+    scale_fill_manual(values = c("BN" = "blue", "AMD" = "red")) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(plot = p,
+         filename = "./figure_raw/mice_metabolomics_res/sfig2_metabolomics_distribution.pdf", 
+         width = 6, height = 4)
+```
+
+# 3. DE analysis of the metabolomics data
+
+```{r}
+# load the data
+  load(file = "./data/metabolomics_data_mice.rdata")
+
+# perform DE analysis
+  res = data.frame(matrix(nrow = nrow(metabolomics_final), ncol = 5))
+  colnames(res) =  c("AvgWT", "AvgMD", "Log2FC", "Log2BM", "pval")
+  for (i in 1:nrow(metabolomics_final)) {
+    vec = as.numeric(metabolomics_final[i,1:20])
+    m1= mean(na.omit(vec[1:10])) # WT
+    m2= mean(na.omit(vec[11:20])) # MD
+    m = log2(m2/m1)
+    a = (log2(m1)+log2(m2))/2
+    p = t.test(vec[1:10], vec[11:20])$p.value # two sided
+    res[i,] = c(m1,m2,m,a,p)
+  }
+  
+  res$padj = p.adjust(res$pval, method = "fdr")
+  
+  res$metabolits = metabolomics_final$Compounds
+  
+  save(res, file = "./data/metabolomics_data_mice_deres.rdata")
+```
+
+```{r}
+  load(file = "./data/metabolomics_data_mice_deres.rdata")
+# MA plot
+  res$color_group <- ifelse(abs(res$Log2FC) > 1 & res$pval < 0.05, 
+                            ifelse(res$Log2FC >= 1, "Significant Positive", "Significant Negative"), 
+                            "Non-significant")
+  table(res$color_group)
+  write.csv(res[res$color_group %in% c("Significant Positive", "Significant Negative"),],
+            file = "./figure_raw/mice_metabolomics_res/4_mice_de_metabolites.csv")
+# Create the MA plot
+  ggplot(res, aes(x = Log2BM, y = Log2FC, colour = color_group)) +
+      geom_point(alpha = 0.5) +  # Plot points with transparency for better visualization
+      scale_color_manual(values = c("Non-significant" = "grey", 
+                                    "Significant Positive" = "red", 
+                                    "Significant Negative" = "darkblue")) +
+      labs(x = "Average", y = "Log2 Fold Change",
+           colour = "Significance") +
+      theme_minimal()  # Use a minimal theme
+  
+  ggsave("./figure_raw/mice_metabolomics_res/sfig3_MAplot_mice_metabolomics.pdf")
+```
+
+# 4. PCA plot of the metabolomics data
+
+```{r}
+# Assuming your data is in a matrix or data frame called 'data_matrix'
+# Replace NA values with the column means
+  data_matrix = metabolomics_final[! res$color_group %in% "Non-significant",1:20]
+  pca_result <- prcomp(t(log2(data_matrix+1)), scale. = T)
+# Create a data frame with the PCA results and sample information
+  pca_data <- as.data.frame((pca_result$x))
+  pca_data$Group <- c(rep("Healthy control",10),rep("MD",10) ) 
+  pca_data$Sample<- row.names(pca_data)
+# Plot PCA using ggplot2
+  ggplot(pca_data, aes(x = PC1, y = PC2, color = Group, shape = Group)) +
+    geom_point(size = 3) +
+    stat_ellipse(type = "norm", linetype = 2) +
+    geom_text(aes(label = Sample), vjust = 1.5, size = 3) +  # Add sample names
+    scale_color_manual(values = c("Healthy control" = "#006989", "MD" = "#EE4E4E")) +
+    labs(title = "PCA Plot of Samples",
+         x = paste("PC1 (", round(summary(pca_result)$importance[2,1]*100, 2), "%)", sep=""),
+         y = paste("PC2 (", round(summary(pca_result)$importance[2,2]*100, 2), "%)", sep="")) +
+    theme_bw() +
+    theme(legend.position = "right",
+          axis.text.x = element_text(angle = 45, hjust = 1)) +
+    ggtitle("PCA Plot of Samples") +
+    xlab(paste("PC1 (", round(summary(pca_result)$importance[2,1]*100, 2), "%)", sep="")) +
+    ylab(paste("PC2 (", round(summary(pca_result)$importance[2,2]*100, 2), "%)", sep=""))
+  ggsave("./figure_raw/mice_metabolomics_res/1_PCA_mice_metabolomics.pdf")
+```
+
+# 5. KEGG impact plot
+
+```{r warning=FALSE, fig.width=7, fig.height=6}
+# Read the pathway analysis results
+  pathway_res = read.csv("./figure_raw/mice_metabolomics_res/pathway/pathway_results_mice.csv",
+                         row.names = 1)
+  ggplot(pathway_res, aes(x=Impact, y=X.log10.p., size=Hits, color=X.log10.p.)) +
+    geom_point(alpha=1) +
+    scale_color_gradient(low = "darkblue", high = "#EE4E4E") +
+    theme_classic() +
+    geom_text(aes(label=ifelse(X.log10.p. > 4.5, rownames(pathway_res), '')),
+              hjust=0, vjust=0,
+              color = "black")
+  ggsave("./figure_raw/mice_metabolomics_res/2_kegg_impactplot.pdf", width = 7, height = 6)
+```

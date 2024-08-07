@@ -1,0 +1,288 @@
+---
+title: "metabolomics_analysis"
+author: "Shuai"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r warning=FALSE}
+# library
+  library(readxl)
+  library(tidyr)
+  library(tidyverse)
+  library(dplyr)
+  library(ggplot2)
+```
+
+# 1. Prepare the input for MetaboAnalysit
+
+```{r}
+# Prepare the input for MetaboAnalyst P vs N
+  # input = readxl::read_excel("./data/metabolomics_data.xlsx")
+  # input = data.frame(t(input))
+  # input2 = input[c(1,5:87),]
+  # input3 = input2[,-which(input2["HMDB",] == "-")]
+  # colnames(input3) = input3[1,]; input4 = input3[-1,]
+  # input4 = cbind(Phenotype = c(rep("AMD",58),rep("BN",25)),input4)
+  # write.csv(input4, file = "./data/metaboanalyst_input.csv")
+```
+
+# 2. Data overview
+
+```{r fig.height=5, fig.width=15}
+# Read the raw data (metabolite2 table is after DE analysis)
+  metabolomics = readxl::read_xlsx("./data/metabolomics_data.xlsx")
+  # hist(rowSums(is.na(metabolomics[,5:87])))
+  metabolomics = metabolomics[which(rowSums(is.na(metabolomics[,5:87]))<=10),]
+  # table(metabolomics$`Class I`)
+  # table(metabolomics$`Class II`)
+```
+
+```{r fig.width=8, fig.height=8}
+# plot the class annotation
+  metabolite_class = sort(table(metabolomics$`Class I`), decreasing = T)
+  metabolite_class  
+  df = data.frame(Class = names(metabolite_class),
+                  Value = as.numeric(metabolite_class))
+  df$Class = factor(df$Class, levels = rev(names(metabolite_class)))
+  ggplot(df, aes(x = Class, y = Value)) +
+    geom_bar(stat = "identity", fill = "black") +
+    coord_flip() +
+    labs(title = "Protein Class", x = "Protein Class", y = "Number of Proteins") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  # ggsave("./figure_raw/metabolomics_res/1_metabolite_class.pdf", height = 8, width = 8)
+```
+
+```{r}
+# Prepare the transformed matrix
+  expr = metabolomics[,5:87]
+  expr[is.na(expr)] = 0
+  # expr = preprocessCore::normalize.quantiles(as.matrix(expr), keep.names = T)
+  expr = log2(expr+1)
+  categories <- c(rep("AMD",58), rep("BN",25))
+  colnames(expr) = factor(colnames(expr), levels = c(paste0("MD",1:58), paste0("N",1:25)))
+  names(categories) <- colnames(expr)
+  
+# Convert the matrix to a long format
+  expression_df <- as.data.frame(expr) %>%
+      rownames_to_column(var = "Gene") %>%
+      gather(key = "Sample", value = "Expression", -Gene)
+# Add category information to the data frame
+  expression_df <- expression_df %>% mutate(Category = categories[Sample])
+
+# Create the box plot showing the expression level for each proteins
+  expression_df$Sample = factor(expression_df$Sample, levels = c(paste0("MD",1:58), paste0("N",1:25)))
+  p =
+  ggplot(expression_df, aes(x = Sample, y = Expression, fill = Category)) +
+    geom_boxplot(outlier.shape = NA) +
+    labs(title = "", x = "Sample", y = "Expression") +
+    scale_fill_manual(values = c("BN" = "blue", "AMD" = "red")) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(plot = p, filename = "./manuscirpt_writing/fig_raw/metabolomics_res/2_metabolomics_distribution.pdf", 
+         width = 12, height = 4)
+```
+
+# 3. Perform the DE analysis and PLS-DA analysis
+
+```{r}
+# Obtain the protein expression matrix of metabolomics data
+  metabolomics = readxl::read_xlsx("./data/metabolomics_data.xlsx")
+  metabolomics = metabolomics[which(rowSums(is.na(metabolomics[,5:87]))<=10),] # filter NA with more than 10 
+  expr = as.matrix(metabolomics[,c(5:62,63:87)])
+  expr[is.na(expr)] = 0
+  expr.norm = preprocessCore::normalize.quantiles(expr,keep.names = T)
+  res = data.frame(matrix(nrow = nrow(expr.norm), ncol = 5))
+  colnames(res) =  c("AvgMD", "AvgWT", "Log2FC", "Log2BM", "pval")
+  for (i in 1:nrow(expr.norm)) {
+    vec = expr.norm[i,]
+    m1= mean(na.omit(vec[1:58]))
+    m2= mean(na.omit(vec[59:83]))
+    m = log2(m1/m2)
+    a = (log2(m1)+log2(m2))/2
+    p = t.test(expr.norm[i,1:58], expr.norm[i,59:83])$p.value # two sided
+    res[i,] = c(m1,m2,m,a,p)
+  }
+  res$padj = p.adjust(res$pval, method = "fdr")
+  res$Compounds = metabolomics$Compounds
+  res$HMDB = metabolomics$HMDB
+```
+
+```{r}
+# MA plot
+  res$color_group <- ifelse(abs(res$Log2FC) > 0.75 & res$padj < 0.05, 
+                            ifelse(res$Log2FC >= 0.75, "Significant Positive", "Significant Negative"), 
+                            "Non-significant")
+  table(res$color_group)
+# Create the MA plot
+  ggplot(res, aes(x = Log2BM, y = Log2FC, colour = color_group)) +
+      geom_point(alpha = 0.5) +  # Plot points with transparency for better visualization
+      scale_color_manual(values = c("Non-significant" = "grey", 
+                                    "Significant Positive" = "red", 
+                                    "Significant Negative" = "darkblue")) +
+      labs(x = "Average", y = "Log2 Fold Change",
+           colour = "Significance") +
+      theme_minimal()  # Use a minimal theme
+  ggsave("./manuscirpt_writing/fig_raw/metabolomics_res/3_MAplot.pdf")
+  # res[res$Compounds %in% c("S1P(d16:1)", "S1P(d18:1)", "S1P(d18:2)"),]
+```
+
+# 4. Besides PCA, metabolomics data should also use PLS-DA
+
+```{r}
+# package
+  library(mixOmics)
+  library(ropls)
+  library(scatterplot3d)
+```
+
+```{r}
+# preprocessing
+  expr = metabolomics[res$color_group %in% c("Significant Positive", "Significant Negative"),5:87]
+  group_vector = c(rep("MD", 58),rep("Healthy", 25))
+# PLS-DA analysis and plotting
+  plsda_result <- plsda(X = t(expr), Y = group_vector, ncomp = 3)
+  pls_scores = plsda_result$variates$X
+  explained_variance_percentage <- round(plsda_result$prop_expl_var$X * 100,2)
+  vip_scores <- rowMeans(vip(plsda_result))
+```
+
+```{r fig.width=7, fig.height=6.5}
+# Visualize  
+  pdf("./manuscirpt_writing/fig_raw/metabolomics_res/4_3comp_plsda_plot.pdf", width = 7, height = 6.5)
+  scatterplot3d(pls_scores[, 1], pls_scores[, 2], pls_scores[, 3],
+                color = c(rep("#EE4E4E",58), rep("#006989",25)),
+                pch = ifelse(group_vector == "Healhty", 15, 17),
+                xlab = paste0("Comp1 (",explained_variance_percentage[1],"%)"),
+                ylab = paste0("Comp2 (",explained_variance_percentage[2],"%)"),
+                zlab = paste0("Comp3 (",explained_variance_percentage[3],"%)"),
+                main = "PLS-DA Score Plot")
+  dev.off()
+```
+
+```{r}
+# Final DE results table
+  metainfo = metabolomics[,-c(5:87)]
+  # colnames(metainfo)
+  columns_to_keep = c("HMDB","Compounds","Class I","Class II")
+  res = cbind(metainfo[,columns_to_keep],res)
+  res_sig = res[res$color_group %in% c("Significant Positive", "Significant Negative"),]
+  res_sig$VIP_PLSDA = vip_scores  
+  write.csv(res_sig, file = "./stable_metabolites_desig.csv")
+```
+
+```{r fig.width=10, fig.height=5}
+# Prepare the data  
+  # Reorder df based on 'Age' in ascending order
+  res_de_ordered <- res_sig[order(res_sig$VIP_PLSDA, decreasing = T), ]
+  res_de_ordered_final = rbind(
+    res_de_ordered[which(res_de_ordered$Log2FC > 0),][1:10,],
+    res_de_ordered[which(res_de_ordered$Log2FC < 0),][1:10,]
+  )
+  res_de_ordered_final$Type = c(rep("UP",10),rep("DOWN",10))
+  data = data.frame(
+    Compound = res_de_ordered_final$Compounds,
+    Log2FoldChange = res_de_ordered_final$Log2FC,
+    Type = res_de_ordered_final$Type,
+    VIP = res_de_ordered_final$VIP_PLSDA
+  )
+  
+# Make the ggplot  
+  ggplot(data, aes(x = Log2FoldChange, y = reorder(Compound, Log2FoldChange), size = VIP, color = Type)) +
+    geom_point() +
+    geom_vline(xintercept = 0, linetype = "solid", color = "black", size = 1) +  # Add vertical line at Log2FC = 0
+    geom_segment(aes(xend = 0, yend = reorder(Compound, Log2FoldChange)), color = "grey", size = 1) + 
+    scale_color_manual(values = c("DOWN" = "darkblue", "UP" = "red")) +
+    scale_size_continuous(range = c(3, 8)) +
+    labs(x = "Log2(Fold Change)", y = "Compound", title = "Compound Analysis") +
+    theme_minimal() +
+    theme(legend.position = "right", 
+          axis.text.y = element_text(size = 7))
+  ggsave("./manuscirpt_writing/fig_raw/metabolomics_res/5_topVIP_DEcompounds.pdf", width = 10, height = 5)
+```
+
+# 5. Impact plot
+
+```{r warning=FALSE, fig.width=7, fig.height=6}
+# Read the pathway analysis results
+  pathway_res = read.csv("./manuscirpt_writing/fig_raw/metabolomics_res/pathway/pathway_results.csv",
+                         row.names = 1)
+  ggplot(pathway_res, aes(x=Impact, y=X.log10.p., size=Hits, color=X.log10.p.)) +
+    geom_point(alpha=1) +
+    scale_color_gradient(low = "darkblue", high = "#EE4E4E") +
+    theme_classic() +
+    geom_text(aes(label=ifelse(X.log10.p. > 10, rownames(pathway_res), '')),
+              hjust=0, vjust=0,
+              color = "black")
+  ggsave("./manuscirpt_writing/fig_raw/metabolomics_res/6_kegg_impactplot.pdf", width = 7, height = 6)
+```
+
+# 6. show the exact level of sphingo lipids
+
+```{r}
+  metabolomics = readxl::read_xlsx("./data/metabolomics_data.xlsx")
+  metabolomics = metabolomics[which(rowSums(is.na(metabolomics[,5:87]))<=10),] # filter NA with more than 10 
+  expr = as.matrix(metabolomics[,c(5:62,63:87)])
+  expr[is.na(expr)] = 0
+  expr.norm = preprocessCore::normalize.quantiles(expr,keep.names = T)
+  expr.log2 = log2(expr+1)
+  labels <- c("Healthy", "MDs")  
+```
+
+```{r fig.width=3.5, fig.height=4}
+# Sphingolipid
+# Create a dataframe with the metabolite names and their corresponding HMDB IDs
+  metabolites = c("S1P(d16:1)","S1P(d18:1)","S1P(d18:2)",
+                  "SPH(d18:0)","SPH(d18:1)","SPH(d18:2)",
+                  "L-Serine", "O-Phosphorylethanolamine")
+# expr
+  for (i in 1:8) {
+    m = metabolites[i]
+    vec = as.numeric(expr.log2[metabolomics$Compounds == m, ])
+    print(round(t.test(vec[59:83], vec[1:58])$p.value, 10))  
+    pdf(paste0("./figure_raw/metabolomics_res/boxplot/",i,".pdf"), height = 4, width = 3.5)
+    boxplot(vec[59:83], vec[1:58],
+            main = m,
+            col = c("#006989","#EE4E4E"),
+            xaxt = "n")   # 禁用 x 轴标签
+    text(x = 1:2, y = par("usr")[3] - 0.5, srt = 45, adj = 1, labels = labels, xpd = TRUE)
+    dev.off()
+  }
+  
+# hub2
+  metabolites = c("2-Phospho-D-glyceric acid", "Phosphoenolpyruvate", "Pyruvic Acid", "Lactic acid")
+# expr
+  for (i in 1:4) {
+    m = metabolites[i]
+    vec = as.numeric(expr.log2[metabolomics$Compounds == m, ])
+    print(round(t.test(vec[59:83], vec[1:58])$p.value, 10))
+    # pdf(paste0("./figure_raw/metabolomics_res/boxplot/",i,".pdf"), height = 4, width = 3.5)
+    # boxplot(vec[59:83], vec[1:58],
+    #         main = m,
+    #         col = c("#006989","#EE4E4E"),
+    #         xaxt = "n")   # 禁用 x 轴标签
+    # text(x = 1:2, y = par("usr")[3] - 0.5, srt = 45, adj = 1, labels = labels, xpd = TRUE)
+    # dev.off()
+  }
+
+```
+
+```{r}
+metabolomics$Compounds#[metabolomics$HMDB %in% "HMDB0000190"]
+```
+
+# 7. KEGG Analysis of the DE metabolites with WebSite if needed
+
+```{r}
+# write the KEGG ID
+  pos = res_de[which(res_de$Log2FC > 0),"KEGGID"]
+  write.table(pos[-which(pos == "---")],
+              file = "./figure_raw/fig4/3_up_keggid.txt", quote = F, col.names = F, row.names = F)
+  neg = res_de[which(res_de$Log2FC < 0),"KEGGID"]
+  write.table(neg[-which(neg == "---")],
+              file = "./figure_raw/fig4/3_dw_keggid.txt", quote = F, col.names = F, row.names = F)
+```
+
+
+

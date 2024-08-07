@@ -1,0 +1,457 @@
+---
+title: "GWAS cross-validation study of our candidate genes"
+author: "Shuai"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Read the data
+
+```{r include=FALSE}
+# Add required packages
+  library(ggplot2)
+  library(hrbrthemes)
+  library("stringr")
+  library(ComplexHeatmap)
+  library(tidyr)
+  library(tidyverse)
+  library(dplyr)
+  library(ggfortify)
+```
+
+#-------------------------------------
+# 1. Prepare the paired data
+#-------------------------------------
+
+```{r}
+# the genes
+  genes_list = c("NFATC1","ALPK2","PTPN23","MACF1","WNK2", # wnt
+                 "FAT1","CELSR2","CELSR1","CELSR3", # morphogenesis of a polarized epi
+                 "APOB","ABCA4","ABCA13","ABCA3")   # lipid metabolism
+```
+
+```{r fig.width=14, fig.height=26}
+# prepare the raw genomics data
+  rv_table = readRDS("./data/4_recurrenct_mutated_genes_cutoff7.rds")
+  load("./data/4_recur_164genes.rdata")
+  mat = matrix(data = "",nrow = length(recurrent_vars), ncol = 49)
+  colnames(mat) = unique(rv_table$sample_id)
+  rownames(mat) = recurrent_vars
+  for (i in recurrent_vars) {
+    for (j in unique(rv_table$SampleName)) {
+      temp_id = which(rv_table$Gene.refGenecanonical == i & rv_table$sample_id == j)
+      if (!identical(temp_id, integer(0))) {
+        temp = rv_table[temp_id,]
+        mat[i,j] = paste(temp$Annotation, collapse = ";")
+      }
+    }
+  }
+  # mat_all = mat
+  # mat_all[mat!= ""] = 1
+  # mat_all[mat== ""] = 0
+  # mat_all = data.frame(mat_all)
+  
+  mat_md13 =  mat[genes_list,]
+  mat_md13[mat_md13!= ""] = 1
+  mat_md13[mat_md13== ""] = 0
+  mat_md13 = data.frame(mat_md13)
+  mat_md13 = as.matrix(sapply(mat_md13, as.numeric))
+  row.names(mat_md13) = genes_list
+```
+
+```{r}
+# prepare the raw metabolomics data
+  metabolomics = as.data.frame(readxl::read_xlsx("./data/metabolomics_data.xlsx")) 
+  row.names(metabolomics) = metabolomics$Compounds
+  metabolomics = metabolomics[which(rowSums(is.na(metabolomics[,5:87]))<=10),] # filter NA with more than 10 
+  expr = as.matrix(metabolomics[,c(5:62,63:87)])
+  expr[is.na(expr)] = 0
+  expr.norm = preprocessCore::normalize.quantiles(expr, keep.names = T)
+  expr.norm = log2(expr.norm+1)
+```
+
+```{r}
+# pair the geno and meta data
+  sampleid = intersect(colnames(expr.norm), colnames(mat_md13))
+  expr_final = expr.norm[,sampleid]
+  geno_final = as.matrix(mat_md13[,sampleid])
+```
+
+#-------------------------------------
+# 2. Perform paired analysis
+#-------------------------------------
+
+```{r warning=FALSE}
+# Load necessary libraries
+  library(CCA)
+  library(WGCNA)
+  library(mixOmics)
+  library(ggplot2)
+```
+
+```{r fig.width=5, fig.height=5}
+# Assuming `genotype_final` and `expr_final` are your data matrices
+# `genotype_final` is 13x46 binary matrix
+# `expr_final` is 986x46 continuous matrix
+
+# Step 1: Canonical Correlation Analysis (CCA) for Coclustering
+# Prepare data
+  genotype_data <-  t(geno_final)  # Transpose to get samples in rows
+  metabolomics_data <- t(expr_final)  # Transpose to get samples in rows
+  
+# Perform PCA
+  pca_result <- prcomp(metabolomics_data, center = F, scale. = F)
+  metabolomics_pca <- pca_result$x[, 1:10]
+  cca_result <- cancor(genotype_data, metabolomics_pca)
+??cancor
+  CCA::
+# Extract canonical variates
+  genotype_canonical <- genotype_data %*% cca_result$xcoef[,1]
+  metabolomics_canonical <- metabolomics_pca %*% cca_result$ycoef[,1]
+
+# Clustering based on canonical variates
+  genotype_cluster <- kmeans(genotype_canonical, centers = 2)
+  metabolomics_cluster <- kmeans(metabolomics_canonical, centers = 2)
+
+# Plot clustering results
+  range(scale(genotype_canonical))
+  range(scale(metabolomics_canonical)) 
+```
+
+```{r fig.width=6, fig.height=5}
+# Create a data frame for ggplot
+  df <- data.frame(
+    GenotypeCanonical1 = scale(genotype_canonical[, 1]),
+    MetabolomicsCanonical1 = scale(metabolomics_canonical[, 1]),
+    Cluster = factor(genotype_cluster$cluster)
+  )
+  table(df$Cluster)
+# Create the ggplot
+  p <- ggplot(df, aes(x = GenotypeCanonical1, y = MetabolomicsCanonical1, color = Cluster)) +
+    geom_point(size = 3) +
+    labs(
+      title = "CCA Clustering",
+      x = "Genotype Canonical Variate 1",
+      y = "Metabolomics Canonical Variate 1"
+    ) +
+    scale_color_manual(values = c("1" = "#006989", "2" = "#EE4E4E")) +
+    theme_minimal()
+
+# Print the plot
+  print(p)
+  ggsave("./figure_raw/integrative/fig3a.pdf", width = 6, height = 5)
+```
+
+```{r fig.width=3, fig.height=5}
+  t.test(colSums(geno_final) ~ genotype_cluster$cluster)
+  
+  pdf(paste0("./figure_raw/integrative/fig3b.pdf"), height = 5, width = 3)
+  
+  boxplot(colSums(geno_final) ~ genotype_cluster$cluster,
+          main = "Mutational burden of MD13 genes",
+          col = c("#006989","#EE4E4E"),
+          xaxt = "n")   # 禁用 x 轴标签
+
+  dev.off()
+```
+
+```{r fig.width=15, fig.height=5}
+# Extract loadings for the first canonical variate
+  genotype_loadings <- cca_result$xcoef[, 1]
+  metabolomics_loadings <- cca_result$ycoef[, 1]
+
+# Identify top features
+  # top_genotype_features <- names(sort(abs(genotype_loadings), decreasing = TRUE)[1:13])
+  # barplot(sort(abs(genotype_loadings), decreasing = TRUE)) 
+  # top_metabolomics_features <- names(sort(abs(metabolomics_loadings), decreasing = TRUE)[1:10])
+
+# Print top features
+  # print(top_genotype_features)
+  # print(top_metabolomics_features)
+
+# Identify top contributing metabolites for PC1 and PC6
+  # library(ggplot2)
+  # pca_loadings <- pca_result$rotation  # This matrix contains the loadings
+  # top_pc1_loadings <- sort(abs(pca_loadings[, "PC1"]), decreasing = TRUE)
+  # top_metabolites_pc1 <- names(top_pc1_loadings[1:10])
+  # print(top_metabolites_pc1)
+  # boxplot(scale(metabolomics_data[, top_metabolites_pc1]), main = "Top Metabolites Contributing to PC1",
+  #         xlab = "Metabolites", ylab = "Scaled Value")
+```
+
+```{r fig.width=6, fig.height=5}
+
+# Create a data frame from the genotype_loadings
+  genotype_loadings_df <- data.frame(
+    Gene = names(genotype_loadings),
+    Loading = genotype_loadings
+  )
+
+# Sort the data frame by the absolute value of the loadings
+  genotype_loadings_df <- genotype_loadings_df[order(abs(genotype_loadings_df$Loading), decreasing = TRUE), ]
+
+# Create the bar plot with ggplot2
+  p <- ggplot(genotype_loadings_df, aes(x = reorder(Gene, abs(Loading)), y = abs(Loading))) +
+    geom_bar(stat = "identity", fill = "#00215E") +
+    coord_flip() +
+    labs(
+      title = "Top Contributing Genes in CCA",
+      x = "Genes",
+      y = "Absolute Loading Value"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+      axis.title = element_text(size = 14),
+      axis.text = element_text(size = 12)
+    )
+  
+  # Print the plot
+  print(p)
+  ggsave("./figure_raw/integrative/fig3c.pdf", width = 6, height = 5)
+
+```
+
+```{r fig.width=2.5, fig.height=4}
+# "SPH(d17:1)", "SPH(d20:1)", "2-Phospho-D-glyceric acid", "Phosphoenolpyruvate"
+# colnames(metabolomics_data)[grep(x = colnames(metabolomics_data), pattern = "^Phosphoenolp")]
+
+  clus = genotype_cluster$cluster
+  m = c("SPH(d18:0)", "SPH(d18:1)", "SPH(d18:2)", "S1P(d16:1)", "S1P(d18:1)", "S1P(d18:2)", "Pyruvic Acid", "Lactic acid")
+  for (i in 1:8 ) {
+    metabolites = m[i]
+    pdf(paste0("./figure_raw/integrative/fig3d_",i,".pdf"), height = 4, width = 2.5)
+    boxplot(expr_final[metabolites,] ~ clus,
+            main = metabolites,
+            col = c("#006989","#EE4E4E"),
+            xaxt = "n")
+    dev.off()
+    print(wilcox.test(expr_final[metabolites,] ~ clus)$p.value)
+  }
+```
+
+```{r}
+# Step 2: Weighted Gene Co-expression Network Analysis (WGCNA)
+# Data preparation
+# Create a combined data frame
+  combined_data <- data.frame(t(geno_final), t(expr_final))
+  powers <- c(c(1:10), seq(from = 12, to = 20, by = 2))
+
+# Call the network topology analysis function
+  sft <- pickSoftThreshold(combined_data, powerVector = powers, verbose = 5)
+
+# Plot the results to visualize the network topology
+  sizeGrWindow(9, 5)
+  par(mfrow = c(1, 2))
+  cex1 <- 0.9
+  # plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2], xlab = "Soft Threshold (power)",
+  #      ylab = "Scale Free Topology Model Fit, signed R^2", type = "n", main = "Scale independence")
+  # text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2], labels = powers, cex = cex1, col = "red")
+  # abline(h = 0.90, col = "red")
+  # 
+  # plot(sft$fitIndices[, 1], sft$fitIndices[, 5], xlab = "Soft Threshold (power)", ylab = "Mean Connectivity", type = "n",
+  #      main = "Mean connectivity")
+  # text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, cex = cex1, col = "red")
+
+# Select the power based on scale independence
+  softPower <- 6  # Chosen based on the previous plot
+
+# Construct the network
+  net <- blockwiseModules(combined_data, power = softPower, TOMType = "unsigned", minModuleSize = 30,
+                          reassignThreshold = 0, mergeCutHeight = 0.25, numericLabels = TRUE, pamRespectsDendro = FALSE,
+                          saveTOMs = TRUE, saveTOMFileBase = "TOM", verbose = 3)
+
+# Convert labels to colors for plotting
+  mergedColors <- labels2colors(net$colors)
+  
+# Plot the dendrogram and the module colors
+  plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]], "Module colors",
+                      dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05)
+  
+# Relate modules to external traits (mutation status)
+  moduleTraitCor <- cor(net$MEs, t(geno_final), use = "p")
+  moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples = ncol(genotype_final))
+  textMatrix <- paste(signif(moduleTraitCor, 2), "\n(", signif(moduleTraitPvalue, 1), ")", sep = "")
+  dim(textMatrix) <- dim(moduleTraitCor)
+```
+```{r}
+# Calculate module membership
+  table(df$Cluster)
+  MDT1 = row.names(df[df$Cluster %in% 1, ]) # Good
+  MDT2 = row.names(df[df$Cluster %in% 2, ]) # Bad
+  # ?moduleEigengenes
+  MEs <- moduleEigengenes(combined_data, colors = mergedColors)$eigengenes
+  colSums(MEs[MDT1,])
+  colSums(MEs[MDT2,])
+  geneModuleMembership <- as.data.frame(cor(combined_data[,14:999], MEs, use = "p"))
+  # geneModuleMembership$color <- paste("MM", mergedColors, sep = "")
+
+# Identify top genes in each module
+  topGenes <- list()
+  for (module in unique(mergedColors)) {
+      moduleGenes <- which(mergedColors == module)
+      kME <- geneModuleMembership[moduleGenes, paste("ME", module, sep = "")]
+      sortedGenes <- order(abs(kME), decreasing = TRUE)
+      topGenes[[module]] <- colnames(combined_data)[moduleGenes][sortedGenes]
+  }
+```
+
+
+```{r}
+# Select top N genes
+topN <- 100
+topGenesSelected <- list()
+for (module in names(topGenes)) {
+    topGenesSelected[[module]] <- topGenes[[module]][1:topN]
+}
+
+# Output top genes
+for (module in names(topGenesSelected)) {
+    cat("Top genes in module", module, ":\n")
+    print(topGenesSelected[[module]])
+    cat("\n")
+}
+
+geneModuleMembership[S,]
+```
+
+
+```{r fig.width=6, fig.height=4}
+pdf(paste0("./figure_raw/integrative/fig3e.pdf"), height = 4, width = 6)
+labeledHeatmap(Matrix = moduleTraitCor, xLabels = rownames(geno_final), yLabels = names(net$MEs),
+               ySymbols = names(net$MEs), colorLabels = FALSE, colors = blueWhiteRed(50),
+               textMatrix = textMatrix, setStdMargins = FALSE, cex.text = 0.5, zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+dev.off()
+```
+
+
+
+
+
+---------------------------------------------------
+
+Draft
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Obtain the protein expression matrix of metabolomics data
+  metabolomics = as.data.frame(readxl::read_xlsx("./data/metabolomics_data.xlsx")) 
+  row.names(metabolomics) = metabolomics$Compounds
+  metabolomics = metabolomics[which(rowSums(is.na(metabolomics[,5:87]))<=10),] # filter NA with more than 10 
+  expr = as.matrix(metabolomics[,c(5:62,63:87)])
+  expr[is.na(expr)] = 0
+  expr.norm = preprocessCore::normalize.quantiles(expr, keep.names = T)
+  res = data.frame(matrix(nrow = nrow(expr.norm), ncol = 5))
+  colnames(res) =  c("AvgMD", "AvgWT", "Log2FC", "Log2BM", "pval")
+  for (i in 1:nrow(expr.norm)) {
+    vec = expr.norm[i,]
+    m1= mean(na.omit(vec[1:58]))
+    m2= mean(na.omit(vec[59:83]))
+    m = log2(m1/m2)
+    a = (log2(m1)+log2(m2))/2
+    p = t.test(expr.norm[i,1:58], expr.norm[i,59:83])$p.value # two sided
+    res[i,] = c(m1,m2,m,a,p)
+  }
+  res$padj = p.adjust(res$pval, method = "fdr")
+  res$Compounds = metabolomics$Compounds
+  res$HMDB = metabolomics$HMDB
+# get the compound names  
+  res$color_group <- ifelse(abs(res$Log2FC) > 0.75 & res$padj < 0.05, 
+                            ifelse(res$Log2FC >= 0.75, "Significant Positive", "Significant Negative"), 
+                            "Non-significant")
+  res_sigup = res[res$color_group %in% c("Significant Positive"),]
+  res_sigdw = res[res$color_group %in% c("Significant Negative"),]
+```
+
+```{r}
+
+  
+  gmres_up = NULL
+  for (g in 1:nrow(genotype_final)) {
+    for (m in 1:nrow(expr.norm_finalup)) {
+      a = t.test(expr.norm_finalup[m,] ~ as.numeric(genotype_final[g,]))
+      P = a$p.value
+      Mean_0 = a$estimate[1]; Mean_1 = a$estimate[2]
+      LogFC = log2(Mean_1/Mean_0)
+      gmres_up = rbind(gmres_up, c(row.names(genotype_final)[g], row.names(expr.norm_finalup)[m],
+                                   Mean_1, Mean_0, LogFC, P))
+    }
+  }
+  colnames(gmres_up) = c("Gene", "Metabolites", "Mean_in_Muts", "Mean_in_nonMuts", "Log2FC","Pvalue")
+  # gmres_up
+  
+  gmres_dw = NULL
+  for (g in 1:nrow(genotype_final)) {
+    for (m in 1:nrow(expr.norm_finaldw)) {
+      a = t.test(expr.norm_finaldw[m,] ~ as.numeric(genotype_final[g,]))
+      P = a$p.value
+      Mean_0 = a$estimate[1]; Mean_1 = a$estimate[2]
+      LogFC = log2(Mean_1/Mean_0)
+      gmres_dw = rbind(gmres_dw, c(row.names(genotype_final)[g], row.names(expr.norm_finaldw)[m],
+                                   Mean_1, Mean_0, LogFC, P))
+    }
+  }
+  colnames(gmres_dw) = c("Gene", "Metabolites", "Mean_in_Muts", "Mean_in_nonMuts", "Log2FC","Pvalue")
+  # gmres_dw
+```
+
+```{r fig.width=10, fig.height=5}
+# Load necessary libraries
+  library(ggplot2)
+  library("scales")
+  genes_list = c("NFATC1","ALPK2","PTPN23","MACF1","WNK2", # wnt
+                 "FAT1","CELSR2","CELSR1","CELSR3", # morphogenesis of a polarized epi
+                 "APOB","ABCA4","ABCA13","ABCA3")   # lipid metabolism
+# Calculate -log10 Pvalue
+  df = as.data.frame(gmres_up)
+  df$Log2FC = as.numeric(df$Log2FC)
+  df$Pvalue = as.numeric(df$Pvalue)
+  df$Gene = factor(df$Gene, levels = genes_list)
+  df$logPvalue <- -log10(df$Pvalue)
+
+# Create the dot plot
+  ggplot(df, aes(x = Metabolites, y = Gene)) +
+    geom_point(aes(size = logPvalue, color = Log2FC)) +
+    scale_color_gradientn( colours = c("blue", "white", "red"), values = scales::rescale( c(range(df$Log2FC)[1], 0, range(df$Log2FC)[2]) ), limits = c(range(df$Log2FC)) ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(x = "Metabolites", y = "Gene", color = "Log2FC", size = "-log10 Pvalue")
+  ggsave("./figure_raw/integrative/md13_vs_up.pdf", height = 5, width = 10)
+  
+# Calculate -log10 Pvalue
+  df = as.data.frame(gmres_dw)
+  df$Log2FC = as.numeric(df$Log2FC)
+  df$Pvalue = as.numeric(df$Pvalue)
+  # df$Pvalue = p.adjust(as.numeric(df$Pvalue), method = "fdr")
+  df$Gene = factor(df$Gene, levels = genes_list)
+  df$logPvalue <- -log10(df$Pvalue)
+
+# Create the dot plot
+  ggplot(df, aes(x = Metabolites, y = Gene)) +
+    geom_point(aes(size = logPvalue, color = Log2FC)) +
+    scale_color_gradientn( colours = c("blue", "white", "red"), values = scales::rescale( c(range(df$Log2FC)[1], 0, range(df$Log2FC)[2]) ), limits = range(df$Log2FC) ) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(x = "Metabolites", y = "Gene", color = "Log2FC", size = "-log10 Pvalue")  
+  ggsave("./figure_raw/integrative/md13_vs_dw.pdf", height = 5, width = 10)
+```
+

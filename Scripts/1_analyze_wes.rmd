@@ -1,0 +1,504 @@
+---
+title: "SNPs data preprocessing"
+author: "Shuai, Yi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r include=FALSE}
+# Add required packages
+  library(ggplot2)
+  library(tidyverse)
+  library(hrbrthemes)
+  library("stringr")
+  library(ComplexHeatmap)
+  library(vcfR)
+  library("readxl")
+  library(tidyr)
+  library(tidyverse)
+  library(dplyr)
+  library(ggfortify)
+  library(clusterProfiler)
+  library(biomaRt)
+  library(PANTHER.db)
+  library(AnnotationDbi)
+  library(org.Hs.eg.db)
+```
+
+```{r}
+# The gene list from public data
+  # genes = read.csv("./gene_list.csv", header = T)
+  # gene.list = unique(genes$x)
+  # reported_167genes = sort(gene.list)
+  # save(reported_167genes, file = "./data/4_reported_167genes.rdata")
+  write.csv(reported_167genes, file = "./temp.csv", row.names = F, col.names = F)
+  # load("./data/4_reported_167genes.rdata")
+```
+
+#-------------------------------------
+# 1. Identify the r.v. genes
+#-------------------------------------
+
+```{r}
+# Supplementary Table 3
+  rv_table = readRDS("./data/4_recurrenct_mutated_genes_cutoff7.rds")
+  # write.csv(rv_table, file = "./data/4_recurrenct_mutated_genes_cutoff7.csv") # save the sTable
+```
+
+```{r fig.height=3, fig.width=7}
+# 1. the frequency distribution
+  # sample_gene_list = unique(paste0(rv_table$sample_id, "_", rv_table$Gene.refGenecanonical))
+  # 
+  # df = data.frame(sort(table(sapply(strsplit(sample_gene_list, split = "_"), '[', 2)),decreasing = T))
+  # 
+  # p =
+  # ggplot(df, aes(x = Freq)) +
+  #   geom_density( color = "steelblue", size = 1) +
+  #   labs(title = "Counts distirbution of the recurrently mutated 164 genes") +
+  #   geom_vline(xintercept = 15, linetype = "dashed", col = "red") +
+  #   theme_classic()
+  # p
+
+  # ggsave(plot = p, filename = "./image/fig3/1_grouping_recur_muts.pdf", width = 7, height = 3)
+```
+
+```{r}
+# Prepare the input data for High impact SNVs
+  sample_gene_list = unique(paste0(rv_table$SampleName, "_", rv_table$Gene.refGenecanonical))
+  a = sort(table(sapply(strsplit(sample_gene_list, split = "_"), '[', 2)), decreasing = T)[c("ADGRV1","CDH23","COL7A1","OTOG")]/49
+  round(a,2)
+  recurrent_vars = names(which(table(sapply(strsplit(sample_gene_list, split = "_"), '[', 2)) >= 7)) #15/49 30%
+  recurrent_vars
+  save(recurrent_vars, file = "./data/4_recur_164genes.rdata")
+  
+  intersect(recurrent_vars, reported_167genes)
+```
+
+#----------------------------------------------------
+# 2. The oncoprint plot of 164 r.v. genes
+#----------------------------------------------------
+
+```{r fig.width=14, fig.height=26}
+# oncoprint plot
+  mat = matrix(data = "",nrow = length(recurrent_vars), ncol = 49)
+  colnames(mat) = unique(rv_table$sample_id)
+  rownames(mat) = recurrent_vars
+  for (i in recurrent_vars) {
+    for (j in unique(rv_table$SampleName)) {
+      temp_id = which(rv_table$Gene.refGenecanonical == i & rv_table$sample_id == j)
+      if (!identical(temp_id, integer(0))) {
+        temp = rv_table[temp_id,]
+        mat[i,j] = paste(temp$Annotation, collapse = ";")
+      }
+    }
+  }
+  write.csv(row.names(mat), file = "./temp.csv") 
+  hist(rowSums(mat == ""))
+  which(rowSums(mat == "") < 40)  
+  col = c(missense_mutation = "#69b3a2", nonsense_mutation = "#E21818",
+          frameshift_indel = "#FFDD83",
+          nonframeshift_indel = "#8D7B68", splice_region= "#071952")
+  # ncRNA_mutation = "#898121"
+  p = 
+    oncoPrint(mat, alter_fun_is_vectorized = T,get_type = function(x) strsplit(x, ";")[[1]],
+                alter_fun = list(
+                    nonsense_mutation = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h-unit(0.5, "mm"),
+                        gp = gpar(fill = col["nonsense_mutation"], col = NA))},
+                    nonframeshift_indel = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h-unit(0.5, "mm"),
+                        gp = gpar(fill = col["nonframeshift_indel"], col = NA))},
+                    splice_region = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9, 
+                        gp = gpar(fill = col["splice_region"], col = NA)),
+                    frameshift_indel = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h*0.6,
+                        gp = gpar(fill = col["frameshift_indel"], col = NA))},
+                    missense_mutation =  function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h*0.4, 
+                        gp = gpar(fill = col["missense_mutation"], col = NA))}
+                    ),
+                col = col)
+
+  pdf(file = "./figure_raw/wes_data_analysis/1_muts_landscape_full.pdf", width = 12, height = 24)
+  p
+  dev.off()
+```
+
+#----------------------------------------------------
+# 3. The classification of 164 recurrent r.v. genes
+#----------------------------------------------------
+
+```{r}
+# Example list of protein names
+  pthOrganisms(PANTHER.db) <- "HUMAN"
+```
+
+```{r fig.width=20, fig.height=5}
+# Convert protein names to UniProt IDs using biomaRt
+  protein_names <- recurrent_snv
+  mart <- useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+  protein_ids <- getBM(attributes = c("hgnc_symbol", "uniprotswissprot"), filters = "hgnc_symbol", values = protein_names, mart = mart)
+  protein_ids <- protein_ids[protein_ids$uniprotswissprot != "", ]
+  uniprot_ids <- protein_ids$uniprotswissprot
+# Retrieve protein classifications using PANTHER.db
+  panther_mapping <- select(PANTHER.db, keys = uniprot_ids, columns = c("CLASS_ID","CLASS_TERM"), keytype = "UNIPROT")
+  panther_mapping_pos = merge(panther_mapping, protein_ids, by.x = c("UNIPROT"), by.y = c("uniprotswissprot"))
+  write.csv(panther_mapping_pos, file = "./figure_raw/wes_data_analysis/2_PANTHERcategory_of_164rvgenes.csv")
+# GGplot
+  data = data.frame(Values   = sort(table(panther_mapping$CLASS_TERM), T))
+  colnames(data) = c("Category", "Values")
+  ggplot(data, aes(x = Category, y = Values)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "Customized Bar Plot", x = "Category", y = "Value") +
+    theme_minimal()+
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  ggsave("./figure_raw/wes_data_analysis/2_PANTHERcategory_of_164rvgenes.pdf", width = 20, height = 5)
+```
+
+```{r}
+# sort the category of interested
+  sort(table(panther_mapping$CLASS_TERM),T)#[5:57]
+  panther_mapping_pos[panther_mapping_pos$CLASS_TERM %in% names(sort(table(panther_mapping$CLASS_TERM), T))[5:57],]  
+  write.csv(panther_mapping_pos[panther_mapping_pos$CLASS_TERM %in% names(sort(table(panther_mapping$CLASS_TERM), T))[5:57],],
+            file = "./temp_164rvgenes.csv")
+  unique(panther_mapping_pos$hgnc_symbol)
+```
+
+#----------------------------------------------------
+# 4. The GO KEGG analysis of 164 recurrent r.v. genes
+#----------------------------------------------------
+
+```{r warning=FALSE, fig.width=8.5, fig.height=8}
+# Use GO analysis to study the GO res of top genes
+  protein_list <-
+    unique(panther_mapping_pos[panther_mapping_pos$CLASS_TERM %in% names(sort(table(panther_mapping$CLASS_TERM), T))[5:57],"hgnc_symbol"])
+  entrez_ids <- bitr(protein_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Perform GO enrichment analysis
+  go_enrich <- enrichGO(gene = entrez_ids$ENTREZID,
+                        OrgDb = org.Hs.eg.db,
+                        keyType = "ENTREZID",
+                        ont = "ALL",
+                        pAdjustMethod = "BH",
+                        qvalueCutoff = 0.05,
+                        readable = TRUE)
+# Dotplot for GO enrichment results
+  go_res = go_enrich@result[!duplicated(go_enrich@result$geneID),]
+  write.csv(go_res, file = "./figure_raw/wes_data_analysis/3_GOres_nonCytoECM.csv")
+  top10_each_ontology <- go_res %>%
+        group_by(ONTOLOGY) %>%
+        slice_head(n = 10) 
+  
+  top10_each_ontology$GeneRatio = top10_each_ontology$Count/55
+  
+  ggplot(top10_each_ontology, aes(x = -log10(p.adjust), 
+                                  y = reorder(Description, -p.adjust), 
+                                  size = GeneRatio, color = -log10(p.adjust))) +
+    geom_point(alpha = 0.7) +  # Add transparency to dots
+    scale_color_gradient(low = "blue", high = "red") +  # Set color gradient from low to high significance
+    scale_size(range = c(3, 10)) +  # Adjust dot size range for visibility
+    labs(title = "Gene Ontology (GO) Enrichment Analysis",
+         x = "-log10(Adjusted p-value)",
+         y = "GO Term Description",
+         color = "-log10(Adjusted p-value)",
+         size = "Gene Ratio") +
+    facet_wrap(~ ONTOLOGY, nrow = 3, scales = "free_y") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),  # Rotate x-axis labels for readability
+          legend.position = "right",  # Adjust legend position as needed
+          strip.background = element_blank(),  # Remove background of facet labels
+          strip.text = element_text(size = 12))  # Adjust size of facet titles
+  ggsave("./figure_raw/wes_data_analysis/3_GOres_nonCytoECM.pdf", width = 8.5, height = 8)
+```
+
+```{r}
+# the genes
+  genes_list = 
+  c("NFATC1","ALPK2","PTPN23","MACF1","WNK2", # wnt
+    "FAT1","CELSR2","CELSR1","CELSR3", # morphogenesis of a polarized epi
+    "APOB","ABCA4","ABCA13","ABCA3")   # lipid metabolism
+```
+
+```{r fig.width=8, fig.height=3.5}
+# oncoprint plot
+  genes = genes_list
+  mat = matrix(data = "",nrow = length(genes), ncol = 49)
+  colnames(mat) = unique(rv_table$sample_id)
+  rownames(mat) = genes
+  for (i in genes) {
+    for (j in unique(rv_table$SampleName)) {
+      temp_id = which(rv_table$Gene.refGenecanonical == i & rv_table$sample_id == j)
+      if (!identical(temp_id, integer(0))) {
+        temp = rv_table[temp_id,]
+        mat[i,j] = paste(temp$Annotation, collapse = ";")
+      }
+    }
+  }
+  col = c(missense_mutation = "#69b3a2", nonsense_mutation = "#E21818",
+          frameshift_indel = "#FFDD83",
+          nonframeshift_indel = "#8D7B68", splice_region= "#071952")
+  # ncRNA_mutation = "#898121"
+  p = 
+    oncoPrint(mat, alter_fun_is_vectorized = T,get_type = function(x) strsplit(x, ";")[[1]],
+                alter_fun = list(
+                    nonsense_mutation = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h-unit(0.5, "mm"),
+                        gp = gpar(fill = col["nonsense_mutation"], col = NA))},
+                    nonframeshift_indel = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h-unit(0.5, "mm"),
+                        gp = gpar(fill = col["nonframeshift_indel"], col = NA))},
+                    splice_region = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9, 
+                        gp = gpar(fill = col["splice_region"], col = NA)),
+                    frameshift_indel = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h*0.6,
+                        gp = gpar(fill = col["frameshift_indel"], col = NA))},
+                    missense_mutation =  function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h*0.4, 
+                        gp = gpar(fill = col["missense_mutation"], col = NA))}
+                    ),
+                col = col)
+
+  pdf(file = "./figure_raw/wes_data_analysis/4_printplot.pdf", width = 8, height = 4)
+  p
+  dev.off()
+```
+
+#----------------------------------------------------
+# 5. The GO KEGG analysis of 164 recurrent r.v. genes
+#----------------------------------------------------
+
+```{r warning=FALSE, fig.width=8.5, fig.height=8}
+# Use GO analysis to study the GO res of top genes
+  protein_list <-
+    unique(panther_mapping_pos[panther_mapping_pos$CLASS_TERM %in% names(sort(table(panther_mapping$CLASS_TERM), T))[5:57],"hgnc_symbol"])
+  entrez_ids <- bitr(protein_list, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+
+# Perform GO enrichment analysis
+  go_enrich <- enrichGO(gene = entrez_ids$ENTREZID,
+                        OrgDb = org.Hs.eg.db,
+                        keyType = "ENTREZID",
+                        ont = "ALL",
+                        pAdjustMethod = "BH",
+                        qvalueCutoff = 0.05,
+                        readable = TRUE)
+# Dotplot for GO enrichment results
+  go_res = go_enrich@result[!duplicated(go_enrich@result$geneID),]
+  write.csv(go_res, file = "./figure_raw/wes_data_analysis/3_GOres_nonCytoECM.csv")
+  top10_each_ontology <- go_res %>%
+        group_by(ONTOLOGY) %>%
+        slice_head(n = 10) 
+  
+  top10_each_ontology$GeneRatio = top10_each_ontology$Count/55
+  
+  ggplot(top10_each_ontology, aes(x = -log10(p.adjust), 
+                                  y = reorder(Description, -p.adjust), 
+                                  size = GeneRatio, color = -log10(p.adjust))) +
+    geom_point(alpha = 0.7) +  # Add transparency to dots
+    scale_color_gradient(low = "blue", high = "red") +  # Set color gradient from low to high significance
+    scale_size(range = c(3, 10)) +  # Adjust dot size range for visibility
+    labs(title = "Gene Ontology (GO) Enrichment Analysis",
+         x = "-log10(Adjusted p-value)",
+         y = "GO Term Description",
+         color = "-log10(Adjusted p-value)",
+         size = "Gene Ratio") +
+    facet_wrap(~ ONTOLOGY, nrow = 3, scales = "free_y") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),  # Rotate x-axis labels for readability
+          legend.position = "right",  # Adjust legend position as needed
+          strip.background = element_blank(),  # Remove background of facet labels
+          strip.text = element_text(size = 12))  # Adjust size of facet titles
+  ggsave("./figure_raw/wes_data_analysis/3_GOres_nonCytoECM.pdf", width = 8.5, height = 8)
+```
+
+```{r}
+# the genes
+  genes_list = 
+  c("NFATC1","ALPK2","PTPN23","MACF1","WNK2", # wnt
+    "FAT1","CELSR2","CELSR1","CELSR3", # morphogenesis of a polarized epi
+    "APOB","ABCA4","ABCA13","ABCA3")   # lipid metabolism
+```
+
+```{r fig.width=8, fig.height=3.5}
+# oncoprint plot
+  genes = genes_list
+  mat = matrix(data = "",nrow = length(genes), ncol = 49)
+  colnames(mat) = unique(rv_table$sample_id)
+  rownames(mat) = genes
+  for (i in genes) {
+    for (j in unique(rv_table$SampleName)) {
+      temp_id = which(rv_table$Gene.refGenecanonical == i & rv_table$sample_id == j)
+      if (!identical(temp_id, integer(0))) {
+        temp = rv_table[temp_id,]
+        mat[i,j] = paste(temp$Annotation, collapse = ";")
+      }
+    }
+  }
+  col = c(missense_mutation = "#69b3a2", nonsense_mutation = "#E21818",
+          frameshift_indel = "#FFDD83",
+          nonframeshift_indel = "#8D7B68", splice_region= "#071952")
+  # ncRNA_mutation = "#898121"
+  p = 
+    oncoPrint(mat, alter_fun_is_vectorized = T,get_type = function(x) strsplit(x, ";")[[1]],
+                alter_fun = list(
+                    nonsense_mutation = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h-unit(0.5, "mm"),
+                        gp = gpar(fill = col["nonsense_mutation"], col = NA))},
+                    nonframeshift_indel = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h-unit(0.5, "mm"),
+                        gp = gpar(fill = col["nonframeshift_indel"], col = NA))},
+                    splice_region = function(x, y, w, h) grid.rect(x, y, w*0.9, h*0.9, 
+                        gp = gpar(fill = col["splice_region"], col = NA)),
+                    frameshift_indel = function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h*0.6,
+                        gp = gpar(fill = col["frameshift_indel"], col = NA))},
+                    missense_mutation =  function(x, y, w, h) {grid.rect(x, y, w-unit(0.5, "mm"), h*0.4, 
+                        gp = gpar(fill = col["missense_mutation"], col = NA))}
+                    ),
+                col = col)
+
+  pdf(file = "./figure_raw/wes_data_analysis/4_printplot.pdf", width = 8, height = 4)
+  p
+  dev.off()
+```
+
+#----------------------------------------------------
+# 6. The hotspots
+#----------------------------------------------------
+
+```{r}
+# Load necessary libraries
+  library(ggplot2)
+  library(dplyr)
+  library(biomaRt)
+  library(ggrepel)
+  ensembl <- useMart("ensembl", dataset="hsapiens_gene_ensembl")
+
+# Your gene list
+  genes = genes_list
+
+# Get chromosome and position data for the genes
+  genes_locations <- getBM(attributes=c('hgnc_symbol', 'chromosome_name', 'start_position', 'end_position'),
+                           filters='hgnc_symbol', values=genes, mart=ensembl)
+  genes_locations$Position = (genes_locations$start_position + genes_locations$end_position)/2
+  colnames(genes_locations)[1:2] = c("Gene","Chromosome")
+  genes_locations$Chromosome <- factor(genes_locations$Chromosome, levels = c(1:22,"X","Y"))
+  genes_locations = na.omit(genes_locations)
+  chromosome_lengths <- data.frame(
+    Chromosome = factor(c(1:22,"X","Y"), levels = c(c(1:22,"X","Y"))),
+    Length =  c(247249719, 242951149, 199501827, 191273063, 180857866, 170899992, 158821424, 146274826, 
+                   140273252, 135374737, 134452384, 132349534, 114142980, 106368585, 100338915, 88827254, 
+                   78774742, 76117153, 63811651, 62435964, 46944323, 49691432, 154913754, 57772954)
+  )
+```
+
+```{r fig.height=8, fig.width=18}
+
+# Plotting
+  p = 
+  ggplot() +
+    geom_segment(data = chromosome_lengths, aes(x = Chromosome, xend = Chromosome, y = 0, yend = Length), color = "black") +
+    # Replace geom_tile with geom_point if you want to use lines to indicate exact positions
+    geom_point(data = genes_locations, aes(x = Chromosome, y = Position), color = "black") +  scale_y_reverse() + 
+    # Use geom_label_repel to avoid overlapping labels and to add lines
+    geom_label_repel(data = genes_locations, aes(x = Chromosome, y = Position, label = Gene),
+                     box.padding = 0.35, point.padding = 0.5, 
+                     segment.color = 'grey50', size = 3) +
+    theme_minimal() +
+    theme(
+      axis.title.y = element_blank(),
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor.y = element_blank()
+    ) +
+    labs(x = "Chromosome", title = "Gene Distribution Across Chromosomes")
+  p
+  ggsave(filename = "./figure_raw/wes_data_analysis/5_chr_distr_of_cd101.pdf", p, width = 18, height = 8)
+
+```
+
+
+#-------------------------------------
+# 4. Analysis of the 88 r.v. genes
+#-------------------------------------
+
+```{r fig.width=6, fig.height=4}
+# Library
+  library(biomaRt)
+  library(dplyr)
+  ensembl <- useMart("ensembl")
+  ensembl <- useDataset("hsapiens_gene_ensembl", mart = ensembl)
+  attributes <- listAttributes(ensembl)
+  rv_table = readRDS("./data/4_recurrenct_mutated_genes_cutoff7.rds")
+
+# Save the fig
+  # pdf(file = paste0("./figure_raw/wes_data_analysis/6_target_gene_aa_distr.pdf"), width = 5, height = 4)
+  genes = genes_list
+  for (g in genes) {
+    muts = rv_table[which(rv_table$Gene.refGenecanonical == g), c("SampleName","AAChange.refGenecanonical")]
+    protein.id = 
+      unique(sub("(.*?)[.].*:.*", "\\1", names(table(muts$AAChange.refGenecanonical))))
+    cds_info <- na.omit(getBM(attributes = c("cdna_coding_start","cdna_coding_end"), filters = "refseq_mrna", values = protein.id, mart = ensembl))
+    cds_length <- max(cds_info[["cdna_coding_end"]]) - min(cds_info[["cdna_coding_start"]]) + 1
+    protein_length = (round(cds_length/3))
+    muts.protein = sub(".*:(p\\..*)", "\\1", names(table(muts$AAChange.refGenecanonical)) )
+
+    muts.sites = gsub("[^0-9]", "", muts.protein)
+    muts$protein = muts$AAChange.refGenecanonical
+    muts$sites = muts$AAChange.refGenecanonical
+    for (i in 1:length(table(muts$AAChange.refGenecanonical))) {
+      idx = which(muts$AAChange.refGenecanonical == names(table(muts$AAChange.refGenecanonical))[i])
+      muts$protein[idx] = muts.protein[i]
+      muts$sites[idx] = muts.sites[i]
+    }
+    mutations_plot <- muts %>% 
+      group_by(sites) %>% 
+      summarize(count = n()) %>% 
+      arrange(sites) %>% 
+      mutate(order = 1:n())
+    mutation_positions <- as.integer(mutations_plot$sites)
+    mutation_counts <- mutations_plot$count
+    amino_acid_positions <- 1:protein_length
+    p = 
+      plot(amino_acid_positions, rep(0,length(amino_acid_positions)), type="n", xlab="Amino acid position", ylab="Mutation count",
+             main = paste0(g), ylim=c(0,7)) #max(mutation_counts)
+      points(mutation_positions, mutation_counts, pch=16, col="#69b3a2") +
+      for(i in 1:length(mutation_positions)){
+        segments(mutation_positions[i], 0, mutation_positions[i], mutation_counts[i], col="#E21818")
+      }
+    print(p)
+  }
+  # dev.off()
+```
+
+```{r fig.width=6, fig.height=4}
+
+  g = "CELSR1"
+  muts = rv_table[which(rv_table$Gene.refGenecanonical == g), c("SampleName","AAChange.refGenecanonical")]
+  protein.id = unique(sub("(.*?)[.].*:.*", "\\1", names(table(muts$AAChange.refGenecanonical))))
+  cds_info <- na.omit(getBM(attributes = c("cdna_coding_start","cdna_coding_end"), filters = "refseq_mrna", values = protein.id, mart = ensembl))
+  cds_length <- max(cds_info[["cdna_coding_end"]]) - min(cds_info[["cdna_coding_start"]]) + 1
+  protein_length = (round(cds_length/3))
+  muts.protein = sub(".*:(p\\..*)", "\\1", names(table(muts$AAChange.refGenecanonical)) )
+  
+  muts.sites = gsub("[^0-9]", "", muts.protein)
+  muts$protein = muts$AAChange.refGenecanonical
+  muts$sites = muts$AAChange.refGenecanonical
+  for (i in 1:length(table(muts$AAChange.refGenecanonical))) {
+      idx = which(muts$AAChange.refGenecanonical == names(table(muts$AAChange.refGenecanonical))[i])
+      muts$protein[idx] = muts.protein[i]
+      muts$sites[idx] = muts.sites[i]
+  }
+  
+  table(muts$protein)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
