@@ -27,7 +27,13 @@ Our study provides the most comprehensive molecular landscape of MD to date, pro
   - `transcriptomics_data_mice_fpkm.rdata`: FPKM data from transcriptomics analysis of the MD mouse model.
 
 ### Scripts
-- R scripts used for data analysis, including quality control, alignment, normalization, and statistical testing.
+- **R Scripts Used for Data Analysis**
+  - `1_analyze_wes.Rmd`: Script for analyzing WES data.
+  - `2_analyze_metabolomics.Rmd`: Script for analyzing metabolomics data.
+  - `3_analyze_paired_wes_metabolomics.Rmd`: Script for integrated analysis of paired WES and metabolomics data.
+  - `4_analyze_mice_metabolomics.Rmd`: Script for analyzing metabolomics data from the MD mouse model.
+  - `5_analyze_mice_transcriptomics.Rmd`: Script for analyzing transcriptomics data (FPKM) from the MD mouse model.
+
 
 ### Results
 - Outputs of the data analysis, including figures and tables summarizing the key findings.
