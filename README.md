@@ -17,18 +17,33 @@ In this study, we employed an integrated multi-omics approach, combining whole-e
 Our study provides the most comprehensive molecular landscape of MD to date, proposing S1P as the central player linking genetic defects, metabolic dysregulation, and inflammatory responses in MD pathogenesis. Importantly, we systematically connect MD with its common comorbidities through S1P dysregulation. Our multi-omics approach unveils novel insights into MD pathophysiology, highlighting S1P signaling as a key therapeutic target for holistic management of MD and its associated conditions, leading to more efficient and effective treatments.
 
 ## Repository Contents
-- **Data**: Contains processed data from the WES and metabolomics profiling (Data have also been deposited on Mendeley at DOI: 10.17632/2dzmgdmwyz.1.).
-- **Scripts**: R scripts used for data analysis.
-- **Results**: Outputs of the data analysis, including figures and tables.
+### Data
+- **md_cohort**
+  - `md_cohort.zip`: A compressed file containing sensitive patient data (password-protected for confidentiality; please contact the corresponding author for the password). The zip file contains:
+    - `metabolomics_data.rdata`: Metabolomics data from the MD patient cohort.
+    - `recurrent_variants_final.rdata`: Whole-exome sequencing data with recurrent variants in the MD patient cohort.
+- **md_mice**
+  - `metabolomics_data_mice.rdata`: Metabolomics data from the MD mouse model.
+  - `transcriptomics_data_mice_fpkm.rdata`: FPKM data from transcriptomics analysis of the MD mouse model.
+
+### Scripts
+- R scripts used for data analysis, including quality control, alignment, normalization, and statistical testing.
+
+### Results
+- Outputs of the data analysis, including figures and tables summarizing the key findings.
+
+### Documentation
+- Detailed documentation of the methods used in the study, including step-by-step protocols for WES and metabolomics data processing.
 
 ## Usage Instructions
 1. **Data Preparation**: Follow the instructions in the `Data` folder to prepare and preprocess the raw data.
 2. **Running Analysis**: Use the scripts provided in the `Scripts` folder to replicate the analysis. Ensure that all dependencies and required packages are installed.
-3. **Interpreting Results**: Refer to the `Results` folder for the output of the analysis.
+3. **Interpreting Results**: Refer to the `Results` folder for the output of the analysis, including visualizations and statistical summaries.
+4. **Further Information**: Consult the `Documentation` folder for detailed descriptions of the methodologies and analytical steps.
 
 ## Contact Information
-For any questions or further information, please contact the corresponding authors:
+For any questions or further information, please contact the following emails:
 - **Hao Huang** (Email: xyskhuanghao@csu.edu.cn)
-- **Chao Huang** (Email: huangchaoalain@foxmail.com)
+- **Shuai Guo** (Email: ashuai.guo.asg@gmail.com)
 
 This README file provides an overview of the study and instructions for accessing and using the repository contents.
